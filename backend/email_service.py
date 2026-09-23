@@ -476,20 +476,69 @@ def _get_microsoft_msal_app():
 
 
 def _get_microsoft_access_token() -> str:
+    """Get a Microsoft Graph access token from the existing MSAL cache.
+
+    The old Render service can have a valid MSAL cache even when the account
+    username stored inside that cache does not exactly match the
+    MICROSOFT_SENDER_EMAIL environment variable. We therefore:
+
+    1. Try the exact sender-email match first.
+    2. Try a normalized/case-insensitive email match.
+    3. If there is exactly one cached account, use that account as the
+       unambiguous fallback.
+
+    We do NOT generate a new login or replace the existing token cache.
+    """
+
     app = _get_microsoft_msal_app()
 
+    all_accounts = app.get_accounts()
+
+    if not all_accounts:
+        raise RuntimeError(
+            "MICROSOFT_TOKEN_CACHE was loaded, but it contains no Microsoft "
+            "login account. Use the complete MSAL cache from the working "
+            "Microsoft setup."
+        )
+
+    wanted_email = _normalize_email_address(MICROSOFT_SENDER_EMAIL)
+
+    # First: exact MSAL username match.
     accounts = app.get_accounts(username=MICROSOFT_SENDER_EMAIL)
 
+    # Second: normalized/case-insensitive match. This also handles harmless
+    # copy/paste differences such as a literal backslash before '@'.
+    if not accounts and wanted_email:
+        for account in all_accounts:
+            username = _normalize_email_address(
+                (account.get("username") or "").strip()
+            )
+            if username == wanted_email:
+                accounts.append(account)
+
+    # Third: if the cache contains exactly one account, there is no ambiguity.
+    # This is the important compatibility fallback for the existing cache.
+    if not accounts and len(all_accounts) == 1:
+        accounts = all_accounts
+
     if not accounts:
+        cached_users = [
+            (account.get("username") or "").strip()
+            for account in all_accounts
+        ]
         raise RuntimeError(
-            "No Microsoft login account was found in MICROSOFT_TOKEN_CACHE. "
-            "Run the local Microsoft login/token-cache generator again and copy the "
-            "complete MSAL cache JSON into Render."
+            "Microsoft login account was not matched to MICROSOFT_SENDER_EMAIL. "
+            f"Sender={MICROSOFT_SENDER_EMAIL!r}; "
+            f"cached account(s)={cached_users!r}. "
+            "Check that the sender mailbox belongs to the Microsoft account "
+            "stored in MICROSOFT_TOKEN_CACHE."
         )
+
+    account = accounts[0]
 
     result = app.acquire_token_silent(
         MICROSOFT_SCOPES,
-        account=accounts[0],
+        account=account,
     )
 
     if not result or "access_token" not in result:
@@ -500,8 +549,10 @@ def _get_microsoft_access_token() -> str:
         )
 
     logger.info(
-        "Microsoft Graph access token acquired successfully for %s.",
+        "Microsoft Graph access token acquired successfully for %s "
+        "(MSAL account=%s).",
         MICROSOFT_SENDER_EMAIL,
+        account.get("username") or "unknown",
     )
     return result["access_token"]
 
