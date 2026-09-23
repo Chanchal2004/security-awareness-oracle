@@ -635,6 +635,34 @@ async def send_email(
     }
 
 
+class _HTMLTextParser(HTMLParser):
+    """Convert HTML email bodies to readable plain text."""
+
+    def __init__(self):
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str):
+        value = (data or "").strip()
+        if value:
+            self.parts.append(value)
+
+    def handle_starttag(self, tag, attrs):
+        # Preserve readable spacing around common block elements.
+        if tag.lower() in {
+            "br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"
+        }:
+            if self.parts and not self.parts[-1].endswith("\n"):
+                self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag.lower() in {
+            "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"
+        }:
+            if self.parts and not self.parts[-1].endswith("\n"):
+                self.parts.append("\n")
+
+
 def _html_to_text(value: str) -> str:
     if not value:
         return ""
