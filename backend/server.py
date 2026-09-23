@@ -41,6 +41,7 @@ from email_service import (
     find_incoming_replies,
     get_incoming_message_details,
 )
+from oracle_service import init_oracle, save_form_submission
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("talbros")
@@ -1233,10 +1234,41 @@ async def public_form_submit(token: str, request: Request):
     if sim["tracking"].get("form_submit"):
         cur = await db.simulation_recipients.find_one({"id": sr["id"]}, {"_id": 0})
         await apply_event(cur, sr["simulation_id"], "FORM_SUBMITTED")
-        await db.form_submissions.insert_one({
+        submission = {
             "id": new_id(), "simulation_id": sr["simulation_id"], "recipient_id": sr["id"],
-            "form_id": sim.get("form_id"), "responses": safe, "timestamp": now_iso()})
+            "form_id": sim.get("form_id"), "responses": safe, "timestamp": now_iso()}
+        await db.form_submissions.insert_one(submission.copy())
+        # Oracle is an additional durable store; a temporary Oracle/network outage
+        # must not break the existing MongoDB-backed awareness flow.
+        await save_form_submission({
+            **submission,
+            "recipient_email": sr.get("email", ""),
+            "department": sr.get("department", ""),
+        })
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# PC sync (pull model; Render never writes directly to a PC filesystem)
+# ---------------------------------------------------------------------------
+@api.get("/pc-sync/submissions")
+async def pc_sync_submissions(request: Request, since: str = ""):
+    expected = os.environ.get("PC_SYNC_TOKEN", "")
+    provided = request.headers.get("X-PC-SYNC-TOKEN", "")
+    if not expected or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    query = {"timestamp": {"$gt": since}} if since else {}
+    items = await db.form_submissions.find(query, {"_id": 0}).sort("timestamp", 1).limit(200).to_list(200)
+    enriched = []
+    for item in items:
+        sr = await db.simulation_recipients.find_one(
+            {"id": item.get("recipient_id")},
+            {"_id": 0, "email": 1, "department": 1},
+        )
+        item["recipient_email"] = (sr or {}).get("email", "")
+        item["department"] = (sr or {}).get("department", "")
+        enriched.append(item)
+    return {"items": enriched}
 
 
 # ---------------------------------------------------------------------------
@@ -2189,6 +2221,7 @@ async def startup():
     await db.email_replies.create_index("recipient_id")
     await db.email_sync_state.create_index("id", unique=True)
 
+    app.state.oracle_ready = await init_oracle()
     app.state.reply_sync_task = asyncio.create_task(_reply_sync_loop())
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
