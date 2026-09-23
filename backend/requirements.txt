@@ -60,3 +60,6 @@ google-auth-oauthlib
 msal
 
 openpyxl>=3.1.0
+
+# Oracle integration
+oracledb>=2.5,<3
